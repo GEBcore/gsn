@@ -4,7 +4,7 @@ pragma solidity ^0.8.6;
 /* solhint-disable no-inline-assembly */
 
 // #if ENABLE_CONSOLE_LOG
-import "hardhat/console.sol";
+import "forge-std/console.sol";
 // #endif
 
 import "@openzeppelin/contracts/utils/introspection/ERC165.sol";

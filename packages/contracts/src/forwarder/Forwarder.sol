@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 
 // #if ENABLE_CONSOLE_LOG
-import "hardhat/console.sol";
+import "forge-std/console.sol";
 // #endif
 
 import "./IForwarder.sol";

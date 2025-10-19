@@ -8,7 +8,7 @@ pragma solidity ^0.8.0;
 pragma abicoder v2;
 
 // #if ENABLE_CONSOLE_LOG
-import "hardhat/console.sol";
+import "forge-std/console.sol";
 // #endif
 
 import "./utils/MinLibBytes.sol";
