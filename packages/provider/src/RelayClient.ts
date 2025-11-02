@@ -66,7 +66,7 @@ import {
   GsnValidateRequestEvent
 } from './GsnEvents'
 import { RelayCallGasLimitCalculationHelper } from '@opengsn/common/dist/RelayCallGasLimitCalculationHelper'
-import { type IPaymaster } from '@opengsn/contracts/types/ethers-contracts'
+import { type IPaymaster } from '@opengsn/contracts/dist/types/ethers-contracts'
 
 // generate "approvalData" and "paymasterData" for a request.
 // both are bytes arrays. paymasterData is part of the client request.

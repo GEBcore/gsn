@@ -2,7 +2,7 @@ import { Contract, type CallOverrides } from '@ethersproject/contracts'
 import { Web3Provider } from '@ethersproject/providers'
 
 import { GsnDomainSeparatorType, GsnRequestType, type LoggerInterface } from '@opengsn/common'
-import { type IForwarder } from '@opengsn/contracts/types/ethers-contracts'
+import { type IForwarder } from '@opengsn/contracts/dist/types/ethers-contracts'
 
 interface TruffleContract {
   contract: any

@@ -51,7 +51,7 @@ import { ServerAction, type ShortBlockInfo } from './StoredTransaction'
 import { type TxStoreManager } from './TxStoreManager'
 import { configureServer, type ServerConfigParams, type ServerDependencies } from './ServerConfigParams'
 import { type Web3MethodsBuilder } from './Web3MethodsBuilder'
-import { type IPaymaster, type IRelayHub } from '@opengsn/contracts/types/ethers-contracts'
+import { type IPaymaster, type IRelayHub } from '@opengsn/contracts/dist/types/ethers-contracts'
 import { BigNumber } from '@ethersproject/bignumber'
 
 export class RelayServer extends EventEmitter {

@@ -41,7 +41,7 @@ import TestWrappedNativeToken from './compiled/TestWrappedNativeToken.json'
 import { type KeyManager } from '@opengsn/relay/dist/KeyManager'
 import { type ServerConfigParams } from '@opengsn/relay/dist/ServerConfigParams'
 import { defaultGsnConfig } from '@opengsn/provider'
-import { Forwarder__factory } from '@opengsn/contracts/types/ethers-contracts'
+import { Forwarder__factory } from '@opengsn/contracts/dist/types/ethers-contracts'
 
 import { registerForwarderForGsn } from './ForwarderUtil'
 

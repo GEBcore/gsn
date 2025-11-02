@@ -1,5 +1,5 @@
 import { BigNumber } from '@ethersproject/bignumber'
-import { type IPaymaster } from '@opengsn/contracts/types/ethers-contracts'
+import { type IPaymaster } from '@opengsn/contracts/dist/types/ethers-contracts'
 
 import { type Address, type IntString } from './types/Aliases'
 import { type ContractInteractor, type RelayCallABI } from './ContractInteractor'
