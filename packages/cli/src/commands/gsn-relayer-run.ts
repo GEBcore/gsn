@@ -13,7 +13,7 @@ program
   .option('--workdir <path>', 'Working directory for relay data storage (default: ./relay-workdir)')
   .option('--port <number>', 'Port number for the relay HTTP server (default: 8090)')
   .option('--devMode', '[WARNING] Development mode: clears all storage on startup. Use with caution!')
-  .option('--logLevel <level>', 'Logging level: error, warn, info, debug (default: info)')
+  .option('--loglevel <level>', 'Logging level: error, warn, info, debug (default: info)')
   .option('--relayHubAddress <addr>', 'Address of the RelayHub contract on the network')
   .option('--managerStakeTokenAddress <addr>', 'Address of the token used for staking')
   .option('--ownerAddress <addr>', 'Address of the relay owner (for withdrawals)')
@@ -44,7 +44,7 @@ Examples:
   gsn relayer-run \\
     --config ./relay-config.json \\
     --ethereumNodeUrl https://custom-node.example.com \\
-    --logLevel debug
+    --loglevel debug
 
   # Run on mainnet with default port
   gsn relayer-run \\

@@ -407,6 +407,7 @@ const ConfigParamsTypes = {
   devMode: 'boolean',
   loggingProvider: 'number',
   logLevel: 'string',
+  loglevel: 'string',  // alias for logLevel to support command-line --loglevel
 
   loggerUrl: 'string',
   loggerUserId: 'string',
@@ -537,6 +538,14 @@ export function parseServerConfig (args: string[], env: any): any {
     configFile = JSON.parse(fs.readFileSync(configFileName, 'utf8'))
     console.log('Initial configuration:', configFile)
   }
+  // Map 'loglevel' (command-line) to 'logLevel' (config object) for consistency
+  // Only use loglevel if logLevel is not provided
+  if (argv.loglevel != null && argv.logLevel == null) {
+    argv.logLevel = argv.loglevel
+  }
+  // Remove loglevel from argv to avoid having both parameters
+  delete argv.loglevel
+
   const config = { ...configFile, ...argv }
   return entriesToObj(Object.entries(config).map(explicitType))
 }
