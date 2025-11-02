@@ -7,7 +7,8 @@ import { BigNumber } from '@ethersproject/bignumber'
 import { type Contract } from 'web3-eth-contract'
 import { Transaction, type TypedTransaction } from '@ethereumjs/tx'
 import { Web3Provider } from '@ethersproject/providers'
-import { fromWei, toHex } from 'web3-utils'
+import { fromWei, toHex, toWei } from 'web3-utils'
+import { parseEther } from 'ethers'
 
 import {
   type Address,
@@ -263,9 +264,17 @@ export class CommandsLogic {
       const sendOptions: any = {
         // chainId: toHex(await this.web3.eth.getChainId()),
         from: options.from,
-        gasLimit: 1e6,
+        gasLimit: 1000000,
         gasPrice
       }
+
+      // DEBUG: Print actual transaction parameters
+      this.logger.info(`DEBUG: Transaction parameters:`)
+      this.logger.info(`- from: ${sendOptions.from}`)
+      this.logger.info(`- gasLimit: ${sendOptions.gasLimit}`)
+      this.logger.info(`- gasPrice (hex): ${sendOptions.gasPrice}`)
+      this.logger.info(`- gasPrice (dec): ${parseInt(sendOptions.gasPrice, 16)} wei`)
+      this.logger.info(`- gasPrice (gwei): ${parseInt(sendOptions.gasPrice, 16) / 1e9} gwei`)
       const response = await this.httpClient.getPingResponse(options.relayUrl)
         .catch((error: any) => {
           this.logger.error(error)
@@ -305,9 +314,14 @@ export class CommandsLogic {
       const tokenDecimals = await stakingTokenContract.decimals()
       const tokenSymbol = await stakingTokenContract.symbol()
 
-      const stakeParam = toBN(toNumber(options.stake) * Math.pow(10, tokenDecimals))
+      // Calculate stake amount based on token decimals
+      const stakeAmountWei = toBN(options.stake.toString()).mul(toBN(10).pow(toBN(tokenDecimals)))
+      const stakeParam = stakeAmountWei
 
-      const formatToken = (val: any): string => formatTokenAmount(BigNumber.from(val.toString()), tokenDecimals, stakingToken ?? '', tokenSymbol)
+      const formatToken = (val: any): string => {
+        const valStr = typeof val === 'bigint' ? val.toString() : val.toString()
+        return formatTokenAmount(BigNumber.from(valStr), tokenDecimals, stakingToken ?? '', tokenSymbol)
+      }
 
       this.logger.info(`current stake= ${formatToken(stake)}`)
 
@@ -316,7 +330,17 @@ export class CommandsLogic {
       }
 
       const bal = await this.contractInteractor.getBalance(relayAddress)
-      if (toBN(bal).gt(toBN(options.funds.toString()))) {
+      // options.funds is already in wei from CLI parameter
+      const fundsWei = toBN(options.funds.toString())
+
+      // DEBUG: Print funding details
+      this.logger.info(`DEBUG: Funding details:`)
+      this.logger.info(`- Relay address: ${relayAddress}`)
+      this.logger.info(`- Relay balance: ${fromWei(bal.toString())} ETH`)
+      this.logger.info(`- Funds to send: ${fromWei(fundsWei.toString())} ETH`)
+      this.logger.info(`- FundsWei (raw): ${fundsWei.toString()} wei`)
+
+      if (toBN(bal.toString()).gt(fundsWei)) {
         this.logger.info('Relayer already funded')
       } else {
         this.logger.info('Funding relayer')
@@ -324,7 +348,7 @@ export class CommandsLogic {
         const fundTx = await this.web3.eth.sendTransaction({
           ...sendOptions,
           to: relayAddress,
-          value: options.funds.toString()
+          value: fundsWei.toString()
         })
         if (fundTx.transactionHash == null) {
           return {
@@ -619,7 +643,10 @@ export class CommandsLogic {
     const tokenDecimals = await stakingTokenContract.decimals()
     const tokenSymbol = await stakingTokenContract.symbol()
 
-    const formatToken = (val: any): string => formatTokenAmount(BigNumber.from(val.toString()), tokenDecimals, stakingTokenAddress ?? '', tokenSymbol)
+    const formatToken = (val: any): string => {
+        const valStr = typeof val === 'bigint' ? val.toString() : val.toString()
+        return formatTokenAmount(BigNumber.from(valStr), tokenDecimals, stakingTokenAddress ?? '', tokenSymbol)
+      }
 
     this.logger.info(`Setting minimum stake of ${formatToken(deployOptions.minimumTokenStake)}`)
     await rInstance.methods.setMinimumStakes([stakingTokenAddress], [deployOptions.minimumTokenStake]).send({ ...options })
