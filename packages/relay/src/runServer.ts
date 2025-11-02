@@ -10,6 +10,7 @@ import { KeyManager } from './KeyManager'
 import { TXSTORE_FILENAME, TxStoreManager } from './TxStoreManager'
 import {
   ContractInteractor,
+  constants,
   type Environment,
   EnvironmentsKeys,
   RelayCallGasLimitCalculationHelper,
@@ -160,9 +161,15 @@ async function run (): Promise<void> {
   console.log(chalk.redBright('Relay worker key manager created. This address is staked and meant only for internal (gsn) usage.' +
     ' Using this address for any other purpose may result in loss of funds.'))
   console.log('Creating interactor...\n')
+  let signer
+  // Always use VoidSigner for ContractInteractor - it only needs an address for logging
+  const { VoidSigner } = await import('@ethersproject/abstract-signer')
+  signer = new VoidSigner(config.ownerAddress || constants.ZERO_ADDRESS, ethersJsonRpcProvider)
+  console.log(`Using VoidSigner for ContractInteractor: ${config.ownerAddress || constants.ZERO_ADDRESS}`)
+
   const contractInteractor = new ContractInteractor({
     provider: ethersJsonRpcProvider,
-    signer: ethersJsonRpcProvider.getSigner(),
+    signer,
     logger,
     environment,
     calldataEstimationSlackFactor: config.calldataEstimationSlackFactor,

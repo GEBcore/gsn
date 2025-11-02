@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import parseArgs from 'minimist'
 
 import { type JsonRpcProvider } from '@ethersproject/providers'
+import { parseEther } from 'ethers'
 
 import {
   type Address,
@@ -421,7 +422,7 @@ const ConfigParamsTypes = {
   managerMinBalance: 'string',
   managerMinStake: 'string',
   managerStakeTokenAddress: 'string',
-  managerTargetBalance: 'number',
+  managerTargetBalance: 'string',
   withdrawToOwnerOnBalance: 'string',
   defaultGasLimit: 'number',
   requestMinValidSeconds: 'number',
@@ -558,11 +559,17 @@ export async function resolveServerConfig (config: Partial<ServerConfigParams>, 
 
   // TODO: avoid functions that are not parts of objects! Refactor this so there is a configured logger before we start blockchain interactions.
   const logger = createServerLogger(config.logLevel ?? 'debug', config.loggerUrl ?? '', config.loggerUserId ?? '')
+  let signer
+  // Always use VoidSigner for ContractInteractor - it only needs an address for logging
+  const { VoidSigner } = await import('@ethersproject/abstract-signer')
+  signer = new VoidSigner(config.ownerAddress || constants.ZERO_ADDRESS, ethersProvider)
+  logger.info(`Using VoidSigner for ContractInteractor: ${config.ownerAddress || constants.ZERO_ADDRESS}`)
+
   const contractInteractor: ContractInteractor = new ContractInteractor({
     maxPageSize: config.pastEventsQueryMaxPageSize ?? Number.MAX_SAFE_INTEGER,
     calldataEstimationSlackFactor: config.calldataEstimationSlackFactor ?? 1,
     provider: ethersProvider,
-    signer: ethersProvider.getSigner(),
+    signer,
     logger,
     deployment: {
       relayHubAddress: config.relayHubAddress
@@ -594,10 +601,11 @@ export function validatePrivateModeParams (config: ServerConfigParams): void {
 }
 
 export function validateBalanceParams (config: ServerConfigParams): void {
-  const workerTargetBalance = toBN(config.workerTargetBalance)
-  const managerTargetBalance = toBN(config.managerTargetBalance)
-  const managerMinBalance = toBN(config.managerMinBalance)
-  const workerMinBalance = toBN(config.workerMinBalance)
+  // Convert ether strings to wei (BN) - supports decimal strings like "0.005"
+  const workerTargetBalance = toBN(parseEther(config.workerTargetBalance).toString())
+  const managerTargetBalance = toBN(parseEther(config.managerTargetBalance).toString())
+  const managerMinBalance = toBN(parseEther(config.managerMinBalance).toString())
+  const workerMinBalance = toBN(parseEther(config.workerMinBalance).toString())
   if (managerTargetBalance.lt(managerMinBalance)) {
     throw new Error('managerTargetBalance must be at least managerMinBalance')
   }
@@ -607,7 +615,7 @@ export function validateBalanceParams (config: ServerConfigParams): void {
   if (config.withdrawToOwnerOnBalance == null) {
     return
   }
-  const withdrawToOwnerOnBalance = toBN(config.withdrawToOwnerOnBalance)
+  const withdrawToOwnerOnBalance = toBN(parseEther(config.withdrawToOwnerOnBalance).toString())
   if (managerTargetBalance.add(workerTargetBalance).gte(withdrawToOwnerOnBalance)) {
     throw new Error('withdrawToOwnerOnBalance must be larger than managerTargetBalance + workerTargetBalance')
   }

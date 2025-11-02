@@ -3,6 +3,7 @@ import { EventEmitter } from 'events'
 import { toBN, toHex } from 'web3-utils'
 import { type PrefixedHexString } from 'ethereumjs-util'
 import { type Block } from '@ethersproject/providers'
+import { parseEther } from 'ethers'
 
 import {
   type Address,
@@ -109,7 +110,7 @@ export class RelayServer extends EventEmitter {
     this.transactionManager = transactionManager
     this.managerAddress = this.transactionManager.managerKeyManager.getAddress(0)
     this.workerAddress = this.transactionManager.workersKeyManager.getAddress(0)
-    this.workerBalanceRequired = new AmountRequired('Worker Balance', BigNumber.from(this.config.workerMinBalance.toString()), constants.ZERO_ADDRESS, this.logger)
+    this.workerBalanceRequired = new AmountRequired('Worker Balance', BigNumber.from(parseEther(this.config.workerMinBalance).toString()), constants.ZERO_ADDRESS, this.logger)
     if (this.config.runPaymasterReputations) {
       if (dependencies.reputationManager == null) {
         throw new Error('ReputationManager is not initialized')
@@ -602,18 +603,18 @@ latestBlock timestamp   | ${latestBlock.timestamp}
     const isWithdrawalPending = await this.txStoreManager.isActionPendingOrRecentlyMined(ServerAction.DEPOSIT_WITHDRAWAL, currentBlockNumber, this.config.recentActionAvoidRepeatDistanceBlocks)
     const isReplenishPendingForWorker = await this.txStoreManager.isActionPendingOrRecentlyMined(ServerAction.VALUE_TRANSFER, currentBlockNumber, this.config.recentActionAvoidRepeatDistanceBlocks, this.workerAddress)
     const mustReplenishWorker = !this.workerBalanceRequired.isSatisfied && !isReplenishPendingForWorker
-    const mustReplenishManager = BigNumber.from(this.config.managerMinBalance.toString()).gt(managerEthBalance) && !isWithdrawalPending
+    const mustReplenishManager = BigNumber.from(parseEther(this.config.managerMinBalance).toString()).gt(managerEthBalance) && !isWithdrawalPending
 
     if (!mustReplenishManager && !mustReplenishWorker) {
       // all filled, nothing to do
       return transactionHashes
     }
 
-    const workerReplenishAmount = BigNumber.from(this.config.workerTargetBalance.toString()).sub(this.workerBalanceRequired.currentValue)
-    const managerReplenishAmount = BigNumber.from(this.config.managerTargetBalance.toString()).sub(managerEthBalance)
+    const workerReplenishAmount = BigNumber.from(parseEther(this.config.workerTargetBalance).toString()).sub(this.workerBalanceRequired.currentValue)
+    const managerReplenishAmount = BigNumber.from(parseEther(this.config.managerTargetBalance).toString()).sub(managerEthBalance)
     const canReplenishManager = managerHubBalance.gte(managerReplenishAmount.toString())
-    const cantReplenishWorkerFromBalance = managerEthBalance.sub(BigNumber.from(this.config.managerMinBalance.toString())).lt(workerReplenishAmount)
-    const canReplenishWorkerFromHubAndBalance = managerHubBalance.add(managerEthBalance.toString()).sub(this.config.managerMinBalance.toString()).gte(workerReplenishAmount.toString())
+    const cantReplenishWorkerFromBalance = managerEthBalance.sub(BigNumber.from(parseEther(this.config.managerMinBalance).toString())).lt(workerReplenishAmount)
+    const canReplenishWorkerFromHubAndBalance = managerHubBalance.add(managerEthBalance.toString()).sub(BigNumber.from(parseEther(this.config.managerMinBalance).toString()).toString()).gte(workerReplenishAmount.toString())
     const mustWithdrawHubDeposit =
       (mustReplenishManager && canReplenishManager) ||
       (mustReplenishWorker && cantReplenishWorkerFromBalance && canReplenishWorkerFromHubAndBalance)
@@ -628,7 +629,7 @@ latestBlock timestamp   | ${latestBlock.timestamp}
       this.logger.debug(
         `== replenishServer: manager eth balance=${managerEthBalance.toString()}  manager hub balance=${managerHubBalance.toString()}
           \n${this.workerBalanceRequired.description}\n refill=${workerReplenishAmount.toString()}`)
-      if (workerReplenishAmount.lt(managerEthBalance.sub(BigNumber.from(this.config.managerMinBalance.toString())))) {
+      if (workerReplenishAmount.lt(managerEthBalance.sub(BigNumber.from(parseEther(this.config.managerMinBalance).toString())))) {
         const transactionHash = await this._replenishWorker(workerReplenishAmount, currentBlockNumber, currentBlockHash, currentBlockTimestamp)
         transactionHashes.push(transactionHash)
       } else {
@@ -694,8 +695,8 @@ latestBlock timestamp   | ${latestBlock.timestamp}
     if (this.shouldRefreshBalances) {
       await this.registrationManager.refreshBalance()
       this.workerBalanceRequired.currentValue = await this.getWorkerBalance(0)
-      isManagerBalanceReady = this.registrationManager.balanceRequired.currentValue.gte(BigNumber.from(this.config.managerMinBalance).div(minBalanceToNotReadyFactor))
-      isWorkerBalanceReady = this.workerBalanceRequired.currentValue.gte(BigNumber.from(this.config.workerMinBalance).div(minBalanceToNotReadyFactor))
+      isManagerBalanceReady = this.registrationManager.balanceRequired.currentValue.gte(BigNumber.from(parseEther(this.config.managerMinBalance).toString()).div(minBalanceToNotReadyFactor))
+      isWorkerBalanceReady = this.workerBalanceRequired.currentValue.gte(BigNumber.from(parseEther(this.config.workerMinBalance).toString()).div(minBalanceToNotReadyFactor))
 
       if (!isManagerBalanceReady || !isWorkerBalanceReady) {
         this.setReadyState(false)
@@ -706,8 +707,8 @@ latestBlock timestamp   | ${latestBlock.timestamp}
       if (!isManagerBalanceReady) {
         this.logger.debug('manager balance too low')
       }
-      const shouldReplenishManager = this.registrationManager.balanceRequired.currentValue.lt(this.config.managerMinBalance.toString())
-      const shouldReplenishWorker = this.workerBalanceRequired.currentValue.lt(this.config.workerMinBalance.toString())
+      const shouldReplenishManager = this.registrationManager.balanceRequired.currentValue.lt(BigNumber.from(parseEther(this.config.managerMinBalance).toString()))
+      const shouldReplenishWorker = this.workerBalanceRequired.currentValue.lt(BigNumber.from(parseEther(this.config.workerMinBalance).toString()))
       this.shouldRefreshBalances = shouldReplenishManager || shouldReplenishWorker
     }
     return isManagerBalanceReady
@@ -761,7 +762,7 @@ latestBlock timestamp   | ${latestBlock.timestamp}
     const requiredWorkerBalance = boostingResults[1].balanceRequiredDetails?.requiredBalance ?? '0'
     if (boostingResults[1].balanceRequiredDetails != null &&
       !boostingResults[1].balanceRequiredDetails?.isSufficient &&
-      toBN(requiredWorkerBalance).gt(toBN(this.config.workerTargetBalance.toString()))) {
+      toBN(requiredWorkerBalance).gt(toBN(parseEther(this.config.workerTargetBalance).toString()))) {
       this.logger.error(`Server configuration problem! Even after the worker is replenished (workerTargetBalance=${this.config.workerTargetBalance}) boosting the next transaction will fail (requiredWorkerBalance=${requiredWorkerBalance}).`)
     }
     this.lastScannedBlock = currentBlock.number
@@ -881,8 +882,8 @@ latestBlock timestamp   | ${latestBlock.timestamp}
         return txHashes
       }
       // todo multiply workerTargetBalance by workerCount when adding multiple workers
-      const reserveBalance = toBN(this.config.managerTargetBalance).add(toBN(this.config.workerTargetBalance))
-      const effectiveWithdrawOnBalance = toBN(this.config.withdrawToOwnerOnBalance).add(reserveBalance)
+      const reserveBalance = toBN(parseEther(this.config.managerTargetBalance).toString()).add(toBN(parseEther(this.config.workerTargetBalance).toString()))
+      const effectiveWithdrawOnBalance = toBN(parseEther(this.config.withdrawToOwnerOnBalance).toString()).add(reserveBalance)
       const managerHubBalance = await this.relayHubContract.balanceOf(this.managerAddress)
       if (managerHubBalance.lt(effectiveWithdrawOnBalance.toString())) {
         return txHashes

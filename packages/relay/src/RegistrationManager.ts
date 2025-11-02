@@ -4,6 +4,7 @@ import { type Block } from '@ethersproject/providers'
 import { type EventEmitter } from 'events'
 import { type PastEventOptions } from 'web3-eth-contract'
 import { type PrefixedHexString } from 'ethereumjs-util'
+import { parseEther } from 'ethers'
 
 import {
   type Address,
@@ -123,7 +124,7 @@ export class RegistrationManager {
       this.printNotRegisteredMessage()
     }
     const minimumStakePerToken = await this.contractInteractor.getMinimumStakePerToken(this.config.managerStakeTokenAddress)
-    this.balanceRequired = new AmountRequired('Balance', BigNumber.from(this.config.managerMinBalance.toString()), constants.ZERO_ADDRESS, this.logger, listener)
+    this.balanceRequired = new AmountRequired('Balance', BigNumber.from(parseEther(this.config.managerMinBalance).toString()), constants.ZERO_ADDRESS, this.logger, listener)
     this.stakeRequired = new AmountRequired('Stake', minimumStakePerToken, constants.ZERO_ADDRESS, this.logger, listener, tokenMetadata)
     await this.refreshBalance()
     const latestBlockTimestamp = toNumber(latestBlock.timestamp)
