@@ -245,10 +245,19 @@ export class CommandsLogic {
     const targetAmount = BigNumber.from(amount)
     if (currentBalance.lt(targetAmount)) {
       const value = targetAmount.sub(currentBalance).toString()
-      await this.contractInteractor.hubDepositFor(paymaster, {
+      const tx = await this.contractInteractor.hubDepositFor(paymaster, {
         value,
         from
       })
+
+      // Wait for transaction confirmation with timeout
+      try {
+        await tx.wait(1) // Wait for 1 confirmation
+        this.logger.info(`Paymaster funding transaction confirmed: ${tx.hash}`)
+      } catch (error: any) {
+        this.logger.warn(`Transaction may still be processing: ${error.message}`)
+      }
+
       return targetAmount
     } else {
       return currentBalance

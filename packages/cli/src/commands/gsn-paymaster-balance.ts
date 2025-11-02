@@ -1,5 +1,5 @@
-import Web3 from 'web3'
-import { CommandsLogic } from '../CommandsLogic'
+import { ContractInteractor, constants, defaultEnvironment } from '@opengsn/common'
+import { StaticJsonRpcProvider } from '@ethersproject/providers'
 import { getNetworkUrl, getPaymasterAddress, getRelayHubAddress, gsnCommander } from '../utils'
 import { createCommandsLogger } from '@opengsn/logger/dist/CommandsWinstonLogger'
 
@@ -19,10 +19,26 @@ const commander = gsnCommander(['h', 'n'])
   }
   const logger = createCommandsLogger(commander.loglevel)
 
-  const logic = new CommandsLogic(nodeURL, logger, { relayHubAddress: hub })
-  await logic.init()
-  const balance = await logic.getPaymasterBalance(paymaster)
-  console.log(`Account ${paymaster} has a GSN balance of ${Web3.utils.fromWei(balance.toString())} ETH`)
+  // Use VoidSigner for read-only operations (same pattern as in runServer)
+  const { VoidSigner } = await import('@ethersproject/abstract-signer')
+  const ethersJsonRpcProvider = new StaticJsonRpcProvider(nodeURL)
+  const voidSigner = new VoidSigner(constants.ZERO_ADDRESS, ethersJsonRpcProvider)
+
+  const contractInteractor = new ContractInteractor({
+    provider: ethersJsonRpcProvider,
+    signer: voidSigner,
+    logger,
+    environment: defaultEnvironment,
+    deployment: { relayHubAddress: hub },
+    maxPageSize: Number.MAX_SAFE_INTEGER
+  })
+
+  await contractInteractor.init()
+  const balance = await contractInteractor.hubBalanceOf(paymaster)
+
+  // Format balance from wei to ether
+  const balanceInEther = parseFloat(balance.toString()) / 1e18
+  console.log(`Account ${paymaster} has a GSN balance of ${balanceInEther.toFixed(6)} ETH`)
 })().catch(
   reason => {
     console.error(reason)
