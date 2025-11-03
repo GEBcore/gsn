@@ -934,7 +934,26 @@ This would require ${pagesCurrent} requests, and configured 'pastEventsQueryMaxP
     txDetails: any): Promise<any> {
     // removing Ethers 'signer' to allow overriding 'from' address
     const viewOnlyHub: IRelayHub = this.relayHubInstance.connect(this.provider)
-    return await viewOnlyHub.calculateCharge(gas, relayData, txDetails)
+
+    try {
+      return await viewOnlyHub.calculateCharge(gas, relayData, txDetails)
+    } catch (error) {
+      // Fallback: use direct eth_call instead of contract call
+      // This is needed for Custom EVM compatibility where contract calls from address(0) may fail
+      this.logger.info(`Contract calculateCharge call failed, using direct eth_call`)
+
+      const contractAddress = await viewOnlyHub.resolvedAddress
+      const callData = viewOnlyHub.interface.encodeFunctionData('calculateCharge', [gas, relayData])
+
+      const result = await this.provider.call({
+        to: contractAddress,
+        data: callData,
+        from: txDetails.from
+        // Remove gasLimit and gasPrice as they cause issues on Substrate EVM
+      })
+
+      return viewOnlyHub.interface.decodeFunctionResult('calculateCharge', result)[0]
+    }
   }
 
   // TODO: !This method is not really necessary - only used for a fraction of transactions. Replace with 'getGasFees'.

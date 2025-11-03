@@ -89,7 +89,8 @@ async function getProvider (
 
     const config: Partial<GSNConfig> = {
       clientId: '0',
-      paymasterAddress: paymaster
+      paymasterAddress: paymaster,
+      performDryRunViewRelayCall: false
     }
 
     const wallet = new Wallet(commander.privateKeyHex, new NoSignerProvider(host))
@@ -126,25 +127,33 @@ async function getProvider (
     nodeURL
   )
 
-  if (commander.abiFile == null || !fs.existsSync(commander.abiFile)) {
-    const file: string = commander.abiFile
-    throw new Error(`--abiFile: ABI file ${file} does not exist`)
+  // ABI is only needed for method calls, not for direct calldata
+  let abiJson: any = null
+
+  if (commander.method != null) {
+    if (commander.abiFile == null || !fs.existsSync(commander.abiFile)) {
+      const file: string = commander.abiFile
+      throw new Error(`--abiFile: ABI file ${file} does not exist`)
+    }
+    abiJson = JSON.parse(fs.readFileSync(commander.abiFile, 'utf8'))
   }
-  const abiJson = JSON.parse(fs.readFileSync(commander.abiFile, 'utf8'))
   if (commander.to == null) {
     throw new Error('--to: target address is missing')
   }
 
-  // Create contract - handle both Web3 provider and ethers Wallet
-  let web3Contract
-  if (commander.directCall === true && provider.sendTransaction) {
-    // Direct call with ethers Wallet - use ethers contract
-    const { Contract } = await import('@ethersproject/contracts')
-    web3Contract = new Contract(commander.to, abiJson, provider)
-  } else {
-    // GSN provider or Web3 provider
-    const web3 = new Web3(provider)
-    web3Contract = new web3.eth.Contract(abiJson, commander.to)
+  // Create contract - only needed for method calls
+  let web3Contract: any = null
+
+  if (commander.method != null && abiJson != null) {
+    if (commander.directCall === true && provider.sendTransaction) {
+      // Direct call with ethers Wallet - use ethers contract
+      const { Contract } = await import('@ethersproject/contracts')
+      web3Contract = new Contract(commander.to, abiJson, provider)
+    } else {
+      // GSN provider or Web3 provider
+      const web3 = new Web3(provider)
+      web3Contract = new web3.eth.Contract(abiJson, commander.to)
+    }
   }
 
   const calldata = commander.calldata
@@ -158,7 +167,7 @@ async function getProvider (
 
   if (calldata != null) {
     // Use calldata directly
-    const gas = commander.gasLimit
+    const gas = commander.gasLimit ? parseInt(commander.gasLimit) : undefined
     let gasPrice
 
     if (commander.directCall === true && provider.sendTransaction) {
