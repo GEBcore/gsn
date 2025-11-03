@@ -11,17 +11,31 @@ import { type HttpProvider } from 'web3-core'
 
 import {
   type Address,
+  constants,
   type LoggerInterface
 } from '@opengsn/common'
+import { Wallet } from '@ethersproject/wallet'
+import { JsonRpcProvider } from '@ethersproject/providers'
 
 import { type GSNConfig, type GSNDependencies, type GSNUnresolvedConstructorInput, RelayProvider } from '@opengsn/provider'
 import { createCommandsLogger } from '@opengsn/logger/dist/CommandsWinstonLogger'
 
 import { getMnemonic, getNetworkUrl, gsnCommander } from '../utils'
-import { CommandsLogic } from '../CommandsLogic'
+// CommandsLogic not used - it requires account access
 
 function commaSeparatedList (value: string, _dummyPrevious: string[]): string[] {
   return value.split(',')
+}
+
+// A provider that extends JsonRpcProvider but bypasses getSigner() calls
+class NoSignerProvider extends JsonRpcProvider {
+  constructor(url: string) {
+    super(url)
+  }
+
+  getSigner(address?: string) {
+    return undefined as any
+  }
 }
 
 gsnCommander(['n', 'f', 'm', 'g', 'l'])
@@ -39,13 +53,8 @@ async function getProvider (
   paymaster: Address,
   mnemonic: string | undefined,
   logger: LoggerInterface,
-  host: string): Promise<{ provider: HttpProvider, from: Address }> {
-  const config: Partial<GSNConfig> = {
-    clientId: '0',
-    paymasterAddress: paymaster
-  }
+  host: string): Promise<{ provider: any, from: Address }> {
   let from: Address
-  let privateKey: PrefixedHexString | undefined
   if (commander.from != null) {
     // provider-controlled private key
     from = commander.from
@@ -57,34 +66,41 @@ async function getProvider (
     // add mnemonic private key to the account manager as an 'ephemeral key'
     const wallet = hdwallet.deriveChild(0).getWallet()
     from = `0x${wallet.getAddress().toString('hex')}`
-    privateKey = `0x${wallet.getPrivateKey().toString('hex')}`
     console.log('mnemonic account:', from)
   } else {
     throw new Error('must specify either "--mnemonic" or pass "--from" account')
   }
+
   if (commander.directCall === true) {
-    const provider = new Web3.providers.HttpProvider(host, {
-      keepAlive: true,
-      timeout: 120000
-    })
-    return { provider, from }
+    // Direct call: use wallet with NoSignerProvider
+    const wallet = new Wallet(commander.privateKeyHex, new NoSignerProvider(host))
+    return { provider: wallet, from }
   } else {
     if (paymaster == null) {
       throw new Error('--paymaster: address not specified')
     }
-    const overrideDependencies: Partial<GSNDependencies> = {
-      logger
+
+    if (commander.privateKeyHex == null) {
+      throw new Error('--privateKeyHex is required for GSN transactions')
     }
-    const provider = new StaticJsonRpcProvider(host)
+
+    // GSN call: use wallet with NoSignerProvider
+    const { RelayProvider } = await import('@opengsn/provider')
+
+    const config: Partial<GSNConfig> = {
+      clientId: '0',
+      paymasterAddress: paymaster
+    }
+
+    const wallet = new Wallet(commander.privateKeyHex, new NoSignerProvider(host))
+
     const input: GSNUnresolvedConstructorInput = {
-      provider,
-      config,
-      overrideDependencies
+      provider: wallet,  // Pass wallet directly - GSN will detect it's a signer
+      config
     }
+
     const relayProvider = await RelayProvider.newWeb3Provider(input)
-    if (privateKey != null) {
-      relayProvider.addAccount(privateKey)
-    }
+
     return {
       provider: relayProvider,
       from
@@ -97,8 +113,10 @@ async function getProvider (
   const nodeURL = getNetworkUrl(network)
   const logger = createCommandsLogger(commander.loglevel)
   const mnemonic = getMnemonic(commander.mnemonic)
-  const logic = new CommandsLogic(nodeURL, logger, {}, mnemonic, commander.derivationPath, commander.derivationIndex, commander.privateKeyHex)
-  await logic.init()
+
+  if (commander.from == null && commander.privateKeyHex == null && mnemonic == null) {
+    throw new Error('must specify either "--from", "--privateKeyHex" or "--mnemonic"')
+  }
 
   const { provider, from } = await getProvider(
     commander.to,
@@ -107,6 +125,7 @@ async function getProvider (
     logger,
     nodeURL
   )
+
   if (commander.abiFile == null || !fs.existsSync(commander.abiFile)) {
     const file: string = commander.abiFile
     throw new Error(`--abiFile: ABI file ${file} does not exist`)
@@ -115,9 +134,18 @@ async function getProvider (
   if (commander.to == null) {
     throw new Error('--to: target address is missing')
   }
-  const web3Contract = logic.contract(abiJson, commander.to)
-  // @ts-ignore
-  web3Contract.setProvider(provider, undefined)
+
+  // Create contract - handle both Web3 provider and ethers Wallet
+  let web3Contract
+  if (commander.directCall === true && provider.sendTransaction) {
+    // Direct call with ethers Wallet - use ethers contract
+    const { Contract } = await import('@ethersproject/contracts')
+    web3Contract = new Contract(commander.to, abiJson, provider)
+  } else {
+    // GSN provider or Web3 provider
+    const web3 = new Web3(provider)
+    web3Contract = new web3.eth.Contract(abiJson, commander.to)
+  }
 
   const calldata = commander.calldata
   const methodName: string = commander.method
@@ -128,24 +156,77 @@ async function getProvider (
     throw new Error('Must pass either --calldata or --method')
   }
 
-  const method = web3Contract.methods[methodName]
-  if (method == null) {
-    throw new Error(`Method (${methodName}) is not found on contract`)
+  if (calldata != null) {
+    // Use calldata directly
+    const gas = commander.gasLimit
+    let gasPrice
+
+    if (commander.directCall === true && provider.sendTransaction) {
+      // Direct call with ethers Wallet
+      gasPrice = commander.gasPrice != null ? toWei(commander.gasPrice, 'gwei').toString() : await provider.getGasPrice()
+
+      const receipt = await provider.sendTransaction({
+        to: commander.to,
+        data: calldata,
+        gasLimit: gas,
+        gasPrice
+      })
+      console.log(receipt)
+    } else {
+      // GSN provider or Web3 provider
+      const web3 = new Web3(provider)
+      gasPrice = commander.gasPrice != null ? toWei(commander.gasPrice, 'gwei').toString() : await web3.eth.getGasPrice()
+
+      const receipt = await web3.eth.sendTransaction({
+        from,
+        to: commander.to,
+        data: calldata,
+        gas,
+        gasPrice: toHex(gasPrice)
+      })
+      console.log(receipt)
+    }
+  } else {
+    // Use method name
+    if (commander.directCall === true && provider.sendTransaction) {
+      // Direct call with ethers contract
+      const method = (web3Contract as any)[methodName]
+      if (method == null) {
+        throw new Error(`Method (${methodName}) is not found on contract`)
+      }
+      const methodParams = commander.methodParams
+
+      const gasPrice = commander.gasPrice != null ? toWei(commander.gasPrice, 'gwei').toString() : await provider.getGasPrice()
+      const gas = commander.gasLimit
+
+      const receipt = await method(...methodParams, {
+        gasLimit: gas,
+        gasPrice
+      })
+      console.log(receipt)
+    } else {
+      // GSN provider or Web3 provider
+      const method = web3Contract.methods[methodName]
+      if (method == null) {
+        throw new Error(`Method (${methodName}) is not found on contract`)
+      }
+      const methodParams = commander.methodParams
+
+      const web3 = new Web3(provider)
+      const gasPrice = toHex(commander.gasPrice != null ? toWei(commander.gasPrice, 'gwei').toString() : await web3.eth.getGasPrice())
+      const gas = commander.gasLimit
+
+      const receipt = await method(...methodParams).send({
+        from,
+        gas,
+        gasPrice
+      })
+      console.log(receipt)
+    }
   }
-  const methodParams = commander.methodParams
 
-  const gasPrice = toHex(commander.gasPrice != null ? toWei(commander.gasPrice, 'gwei').toString() : (await logic.getGasPrice()).toString())
-  const gas = commander.gasLimit
-
-  const receipt = await method(...methodParams).send({
-    from,
-    gas,
-    gasPrice
-  })
-  console.log(receipt)
-
-  console.log(JSON.stringify(methodParams))
-  console.log(web3Contract.options.address)
+  console.log(JSON.stringify(commander.methodParams))
+  console.log('Contract address:', commander.to)
   process.exit(0)
 })().catch(
   reason => {
