@@ -2,6 +2,7 @@
 import commander, { type CommanderStatic } from 'commander'
 import fs from 'fs'
 import path from 'path'
+import { ethers } from 'ethers'
 
 import { type Address, type RelayHubConfiguration, type GSNContractsDeployment, type LoggerInterface } from '@opengsn/common'
 
@@ -192,4 +193,399 @@ export function gsnCommander (options: GsnOption[]): CommanderStatic {
   })
   commander.option('--loglevel <string>', 'silent | error | warn | info | debug', 'debug')
   return commander
+}
+
+// Token-related interfaces and functions for GebPermitERC20Paymaster support
+
+export interface TokenInfo {
+  address: Address
+  exchangeRate: string
+  permitSelector: string
+  validFromBlock: string
+  enabled: boolean
+}
+
+export interface PermitData {
+  owner: Address
+  spender: Address
+  value: string
+  nonce: string
+  deadline: string
+  v: number
+  r: string
+  s: string
+}
+
+/**
+ * Get all supported tokens from a GebPermitERC20Paymaster contract
+ */
+export async function getSupportedTokens (
+  paymasterAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<Address[]> {
+  // GebPermitERC20Paymaster ABI - only the functions we need
+  const paymasterAbi = [
+    'function getSupportedTokens() external view returns (address[])',
+    'function getTokenInfo(address token) external view returns (tuple(uint256 exchangeRate, bytes4 permitSelector, uint256 validFromBlock, bool enabled))'
+  ]
+
+  const paymasterContract = new ethers.Contract(paymasterAddress, paymasterAbi, provider)
+  return await paymasterContract.getSupportedTokens()
+}
+
+/**
+ * Get detailed information about a specific token from the paymaster
+ */
+export async function getTokenInfo (
+  tokenAddress: Address,
+  paymasterAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<TokenInfo | null> {
+  const paymasterAbi = [
+    'function getTokenInfo(address token) external view returns (tuple(uint256 exchangeRate, bytes4 permitSelector, uint256 validFromBlock, bool enabled))'
+  ]
+
+  try {
+    const paymasterContract = new ethers.Contract(paymasterAddress, paymasterAbi, provider)
+    const tokenInfo = await paymasterContract.getTokenInfo(tokenAddress)
+
+    if (!tokenInfo.enabled) {
+      return null
+    }
+
+    return {
+      address: tokenAddress,
+      exchangeRate: tokenInfo.exchangeRate.toString(),
+      permitSelector: tokenInfo.permitSelector,
+      validFromBlock: tokenInfo.validFromBlock.toString(),
+      enabled: tokenInfo.enabled
+    }
+  } catch (error) {
+    console.error(`Error getting token info for ${tokenAddress}:`, error)
+    return null
+  }
+}
+
+/**
+ * Get all supported tokens with their detailed information
+ */
+export async function getAllTokenInfo (
+  paymasterAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<TokenInfo[]> {
+  const supportedTokens = await getSupportedTokens(paymasterAddress, provider)
+  const tokenInfos: TokenInfo[] = []
+
+  for (const tokenAddress of supportedTokens) {
+    const tokenInfo = await getTokenInfo(tokenAddress, paymasterAddress, provider)
+    if (tokenInfo) {
+      tokenInfos.push(tokenInfo)
+    }
+  }
+
+  return tokenInfos
+}
+
+/**
+ * Get ERC20 token details (name, symbol, decimals, balance, nonce)
+ */
+export async function getTokenDetails (
+  tokenAddress: Address,
+  userAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<{ name: string, symbol: string, decimals: number, balance: string, nonce: string }> {
+  const tokenAbi = [
+    'function name() external view returns (string)',
+    'function symbol() external view returns (string)',
+    'function decimals() external view returns (uint8)',
+    'function balanceOf(address account) external view returns (uint256)',
+    'function nonces(address owner) external view returns (uint256)'
+  ]
+
+  const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider)
+
+  const [name, symbol, decimals, balance, nonce] = await Promise.all([
+    tokenContract.name(),
+    tokenContract.symbol(),
+    tokenContract.decimals(),
+    tokenContract.balanceOf(userAddress),
+    tokenContract.nonces(userAddress)
+  ])
+
+  return {
+    name,
+    symbol,
+    decimals,
+    balance: balance.toString(),
+    nonce: nonce.toString()
+  }
+}
+
+/**
+ * Check token allowance for the paymaster
+ */
+export async function getTokenAllowance (
+  tokenAddress: Address,
+  ownerAddress: Address,
+  spenderAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<string> {
+  const tokenAbi = [
+    'function allowance(address owner, address spender) external view returns (uint256)'
+  ]
+
+  const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider)
+  const allowance = await tokenContract.allowance(ownerAddress, spenderAddress)
+  return allowance.toString()
+}
+
+/**
+ * Get current nonce for permit from token contract
+ */
+export async function getTokenNonce (
+  tokenAddress: Address,
+  ownerAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<string> {
+  const tokenAbi = [
+    'function nonces(address owner) external view returns (uint256)'
+  ]
+
+  const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider)
+  const nonce = await tokenContract.nonces(ownerAddress)
+  return nonce.toString()
+}
+
+/**
+ * Generate EIP-712 permit signature for ERC20 tokens
+ */
+export async function generatePermitSignature (
+  tokenAddress: Address,
+  ownerAddress: Address,
+  spenderAddress: Address,
+  value: string,
+  deadline: string,
+  privateKey: string,
+  provider: ethers.JsonRpcProvider
+): Promise<PermitData> {
+  const wallet = new ethers.Wallet(privateKey, provider)
+
+  // Get EIP-712 domain data from token contract
+  const domainData = await getEIP712DomainData(tokenAddress, provider)
+
+  // Get current nonce from token contract (important for EIP-2612)
+  const nonce = await getTokenNonce(tokenAddress, ownerAddress, provider)
+
+  // Create the digest using the exact same method as the contract
+  const domainSeparator = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'bytes32', 'bytes32', 'uint256', 'address'],
+      [
+        ethers.keccak256(ethers.toUtf8Bytes('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)')),
+        ethers.keccak256(ethers.toUtf8Bytes(domainData.name)),
+        ethers.keccak256(ethers.toUtf8Bytes(domainData.version)),
+        domainData.chainId,
+        tokenAddress
+      ]
+    )
+  )
+
+  // Use correct EIP-2612 Permit TypeHash with nonce
+  const permitTypeHash = ethers.keccak256(ethers.toUtf8Bytes('Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)'))
+  const structHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'address', 'address', 'uint256', 'uint256', 'uint256'],
+      [permitTypeHash, ownerAddress, spenderAddress, value, nonce, deadline]
+    )
+  )
+
+  const digest = ethers.keccak256(
+    ethers.solidityPacked(
+      ['bytes1', 'bytes1', 'bytes32', 'bytes32'],
+      ['0x19', '0x01', domainSeparator, structHash]
+    )
+  )
+
+  // Sign the digest using EIP-712 method (direct digest signing, not EIP-191 message signing)
+  const signingKey = new ethers.SigningKey(privateKey)
+  const signature = signingKey.sign(digest)
+  const { v, r, s } = signature
+
+  // Convert v from 0/1 (ethers v6 format) to 27/28 (standard format)
+  // ethers.js v6 SigningKey returns v as 0 or 1 (parity bit), but permit needs 27 or 28
+  // @ts-ignore - TypeScript doesn't know v is actually a number (0 or 1) at runtime
+  const vNormalized = (v === 0 ? 27 : 28)
+
+  return {
+    owner: ownerAddress,
+    spender: spenderAddress,
+    value,
+    nonce,
+    deadline,
+    v: vNormalized,
+    r,
+    s
+  }
+}
+
+/**
+ * Get EIP-712 domain data from token contract
+ */
+async function getEIP712DomainData (
+  tokenAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<{ name: string, version: string, chainId: bigint }> {
+  try {
+    // Get domain data from token contract
+    const tokenAbi = [
+      'function eip712Domain() external view returns (bytes1 fields, string memory name, string memory version, uint256 chainId, address verifyingContract, bytes32 salt, uint256[] memory extensions)'
+    ];
+    const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
+    const result = await tokenContract.eip712Domain();
+
+    const [fields, name, version, chainId, verifyingContract, salt, extensions] = result;
+
+    return {
+      name,
+      version,
+      chainId
+    };
+  } catch (error) {
+    console.warn('⚠️  eip712Domain() call failed for token', tokenAddress, '- using fallback domain. Error:', (error as Error).message);
+
+    // Fallback to manual domain creation
+    const network = await provider.getNetwork();
+    return {
+      name: 'ERC20Token',
+      version: '1',
+      chainId: network.chainId
+    };
+  }
+}
+
+/**
+ * Get EIP-712 domain separator for a token (legacy)
+ */
+async function getEIP712Domain (
+  tokenAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<string> {
+  const domainData = await getEIP712DomainData(tokenAddress, provider);
+
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'bytes32', 'bytes32', 'uint256', 'address'],
+      [
+        ethers.keccak256(ethers.toUtf8Bytes('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)')),
+        ethers.keccak256(ethers.toUtf8Bytes(domainData.name)),
+        ethers.keccak256(ethers.toUtf8Bytes(domainData.version)),
+        domainData.chainId,
+        tokenAddress
+      ]
+    )
+  );
+}
+
+/**
+ * Encode permit data for approvalData field
+ */
+export function encodePermitData (permitData: PermitData, permitSelector: string): string {
+  // Generate compact 260-byte encoding (4 bytes selector + 256 bytes parameters)
+  // Each parameter is exactly 32 bytes in compact format
+
+  // Convert each parameter to exactly 32 bytes
+  const params32Bytes = [
+    // address: 20 bytes -> pad to 32 bytes (64 hex chars)
+    permitData.owner.slice(2).padStart(64, '0'),
+    // address: 20 bytes -> pad to 32 bytes (64 hex chars)
+    permitData.spender.slice(2).padStart(64, '0'),
+    // uint256: convert to hex and pad to 32 bytes (64 hex chars)
+    BigInt(permitData.value).toString(16).padStart(64, '0'),
+    // uint256: convert to hex and pad to 32 bytes (64 hex chars)
+    BigInt(permitData.nonce).toString(16).padStart(64, '0'),
+    // uint256: convert to hex and pad to 32 bytes (64 hex chars)
+    BigInt(permitData.deadline).toString(16).padStart(64, '0'),
+    // uint8: convert to hex and pad to 32 bytes (64 hex chars)
+    BigInt(permitData.v).toString(16).padStart(64, '0'),
+    // bytes32: already 32 bytes, just remove 0x prefix
+    permitData.r.slice(2),
+    // bytes32: already 32 bytes, just remove 0x prefix
+    permitData.s.slice(2)
+  ]
+
+  // Combine all parameters (total: 8 * 32 = 256 bytes)
+  const encodedParams = '0x' + params32Bytes.join('')
+
+  // Extract only the first 4 bytes (10 hex chars including 0x) of the permit selector
+  // Paymaster may store it as 32 bytes, but we only need the 4-byte function selector
+  const functionSelector = permitSelector.slice(0, 10)
+
+  // Combine selector and parameters (4 + 256 = 260 bytes total)
+  return functionSelector + encodedParams.slice(2)
+}
+
+/**
+ * Encode paymasterData (token address)
+ * GebPermitERC20Paymaster expects exactly 32 bytes containing the token address
+ */
+export function encodePaymasterData (tokenAddress: Address): string {
+  // Remove 0x prefix if present
+  const cleanAddress = tokenAddress.replace('0x', '')
+  // Pad to 64 characters (32 bytes) and prepend with 0x
+  return '0x' + cleanAddress.padStart(64, '0')
+}
+
+/**
+ * Calculate default deadline (1 hour from now)
+ */
+export function getDefaultDeadline (): string {
+  return Math.floor(Date.now() / 1000 + 3600).toString()
+}
+
+/**
+ * Display supported tokens with user information
+ */
+export async function displaySupportedTokens (
+  paymasterAddress: Address,
+  userAddress: Address,
+  provider: ethers.JsonRpcProvider
+): Promise<void> {
+  console.log('Fetching supported tokens from paymaster...')
+
+  const tokenInfos = await getAllTokenInfo(paymasterAddress, provider)
+
+  if (tokenInfos.length === 0) {
+    console.log('No supported tokens found for this paymaster.')
+    return
+  }
+
+  console.log('\nSupported Tokens:')
+  console.log('==================')
+
+  for (let i = 0; i < tokenInfos.length; i++) {
+    const tokenInfo = tokenInfos[i]
+    console.log(`\n${i + 1}. ${tokenInfo.address}`)
+
+    try {
+      const tokenDetails = await getTokenDetails(tokenInfo.address, userAddress, provider)
+      const allowance = await getTokenAllowance(tokenInfo.address, userAddress, paymasterAddress, provider)
+
+      console.log(`   Name: ${tokenDetails.name} (${tokenDetails.symbol})`)
+      console.log(`   Decimals: ${tokenDetails.decimals}`)
+      console.log(`   Your Balance: ${ethers.formatUnits(tokenDetails.balance, tokenDetails.decimals)} ${tokenDetails.symbol}`)
+      console.log(`   Your Nonce: ${tokenDetails.nonce}`)
+      console.log(`   Allowance: ${ethers.formatUnits(allowance, tokenDetails.decimals)} ${tokenDetails.symbol}`)
+      console.log(`   Exchange Rate: 1 ETH = ${ethers.formatUnits(tokenInfo.exchangeRate, 18)} ${tokenDetails.symbol}`)
+      console.log(`   Valid From Block: ${tokenInfo.validFromBlock}`)
+      console.log(`   Permit Selector: ${tokenInfo.permitSelector}`)
+
+      if (allowance === '0') {
+        console.log('   ⚠️  Permit required (no allowance)')
+      } else {
+        console.log('   ✅ Sufficient allowance')
+      }
+    } catch (error) {
+      console.log(`   Error getting token details: ${error}`)
+    }
+  }
 }
