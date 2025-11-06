@@ -371,24 +371,11 @@ export async function generatePermitSignature (
   const wallet = new ethers.Wallet(privateKey, provider)
 
   // Get EIP-712 domain data from token contract
-  const domainData = await getEIP712DomainData(tokenAddress, provider)
+  // Get DOMAIN_SEPARATOR directly from token contract
+  const domainSeparator = await getEIP712DomainSeparator(tokenAddress, provider)
 
   // Get current nonce from token contract (important for EIP-2612)
   const nonce = await getTokenNonce(tokenAddress, ownerAddress, provider)
-
-  // Create the digest using the exact same method as the contract
-  const domainSeparator = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32', 'uint256', 'address'],
-      [
-        ethers.keccak256(ethers.toUtf8Bytes('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)')),
-        ethers.keccak256(ethers.toUtf8Bytes(domainData.name)),
-        ethers.keccak256(ethers.toUtf8Bytes(domainData.version)),
-        domainData.chainId,
-        tokenAddress
-      ]
-    )
-  )
 
   // Use correct EIP-2612 Permit TypeHash with nonce
   const permitTypeHash = ethers.keccak256(ethers.toUtf8Bytes('Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)'))
@@ -411,10 +398,10 @@ export async function generatePermitSignature (
   const signature = signingKey.sign(digest)
   const { v, r, s } = signature
 
-  // Convert v from 0/1 (ethers v6 format) to 27/28 (standard format)
-  // ethers.js v6 SigningKey returns v as 0 or 1 (parity bit), but permit needs 27 or 28
-  // @ts-ignore - TypeScript doesn't know v is actually a number (0 or 1) at runtime
-  const vNormalized = (v === 0 ? 27 : 28)
+  // Ethers SigningKey returns v as 27 or 28 (standard EIP-712 format)
+  // No conversion needed, just ensure it's a number
+  // @ts-ignore - TypeScript doesn't know v type
+  const vNormalized = Number(v)
 
   return {
     owner: ownerAddress,
@@ -431,72 +418,28 @@ export async function generatePermitSignature (
 /**
  * Get EIP-712 domain data from token contract
  */
-async function getEIP712DomainData (
-  tokenAddress: Address,
-  provider: ethers.JsonRpcProvider
-): Promise<{ name: string, version: string, chainId: bigint }> {
-  try {
-    // Get domain data from token contract
-    const tokenAbi = [
-      'function eip712Domain() external view returns (bytes1 fields, string memory name, string memory version, uint256 chainId, address verifyingContract, bytes32 salt, uint256[] memory extensions)'
-    ];
-    const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
-    const result = await tokenContract.eip712Domain();
-
-    const [fields, name, version, chainId, verifyingContract, salt, extensions] = result;
-
-    return {
-      name,
-      version,
-      chainId
-    };
-  } catch (error) {
-    console.warn('⚠️  eip712Domain() call failed for token', tokenAddress, '- using fallback domain. Error:', (error as Error).message);
-
-    // Fallback to manual domain creation
-    const network = await provider.getNetwork();
-    return {
-      name: 'ERC20Token',
-      version: '1',
-      chainId: network.chainId
-    };
-  }
-}
-
-/**
- * Get EIP-712 domain separator for a token (legacy)
- */
-async function getEIP712Domain (
+async function getEIP712DomainSeparator (
   tokenAddress: Address,
   provider: ethers.JsonRpcProvider
 ): Promise<string> {
-  const domainData = await getEIP712DomainData(tokenAddress, provider);
+  // Directly get DOMAIN_SEPARATOR from token contract
+  const tokenAbi = [
+    'function DOMAIN_SEPARATOR() external view returns (bytes32)'
+  ];
+  const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
 
-  return ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32', 'uint256', 'address'],
-      [
-        ethers.keccak256(ethers.toUtf8Bytes('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)')),
-        ethers.keccak256(ethers.toUtf8Bytes(domainData.name)),
-        ethers.keccak256(ethers.toUtf8Bytes(domainData.version)),
-        domainData.chainId,
-        tokenAddress
-      ]
-    )
-  );
+  try {
+    const domainSeparator = await tokenContract.DOMAIN_SEPARATOR();
+    return domainSeparator;
+  } catch (error) {
+    throw new Error(`Token contract at ${tokenAddress} does not support DOMAIN_SEPARATOR() function. Please use a token contract that implements EIP-712.`);
+  }
 }
 
-/**
- * Encode permit data for approvalData field
- */
 
 /**
  * Encode paymasterData (token address)
  * GebPermitERC20Paymaster expects exactly 32 bytes containing the token address
- */
-/**
- * Encode approval data using proper contract interface (replaces manual encoding)
- * This ensures correct ABI encoding that matches Solidity contract expectations
  */
 export function encodePermitDataWithContractInterface (
   tokenAddress: Address,
