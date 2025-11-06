@@ -28,7 +28,7 @@ import {
   getTokenDetails,
   getTokenAllowance,
   generatePermitSignature,
-  encodePermitData,
+  encodePermitDataWithContractInterface,
   encodePaymasterData,
   getDefaultDeadline,
   displaySupportedTokens
@@ -121,7 +121,7 @@ async function handleTokenOperations (
     }
 
     // Set a generous permit value (equivalent to large amount of ETH)
-    const permitValue = ethers.parseUnits('1000', 18).toString() // 1000 ETH equivalent
+    const permitValue = ethers.MaxUint256.toString() // Maximum possible value
 
     // Set deadline
     const deadline = commander.permitDeadline || getDefaultDeadline()
@@ -138,8 +138,13 @@ async function handleTokenOperations (
       provider
     )
 
-    // Encode the approval data
-    approvalData = encodePermitData(permitData, tokenInfo.permitSelector)
+    // Encode the approval data using proper contract interface
+    approvalData = encodePermitDataWithContractInterface(
+      tokenAddress,
+      permitData,
+      tokenInfo.permitSelector,
+      provider
+    )
     console.log('✅ Permit signature generated successfully')
   } else {
     console.log('✅ Sufficient allowance already exists')
@@ -289,14 +294,16 @@ async function getProvider (
             const gasPrice = relayRequest.relayData.maxFeePerGas || '0x927c0'
             const maxEthCharge = BigInt(gasEstimate) * BigInt(gasPrice)
 
-            // Get token info to calculate token cost
+            // Get token info and details to calculate token cost
             const tokenInfo = await getTokenInfo(tokenAddress, paymaster, tempProvider)
-            if (tokenInfo) {
+            const tokenDetails = await getTokenDetails(tokenAddress, from, tempProvider)
+            if (tokenInfo && tokenDetails) {
               const maxTokenCharge = (maxEthCharge * BigInt(tokenInfo.exchangeRate)) / BigInt('1000000000000000000')
 
               console.log(`🔍 Checking allowance:`)
-              console.log(`   Current allowance: ${ethers.formatUnits(allowance, 18)}`)
-              console.log(`   Required: ${ethers.formatUnits(maxTokenCharge.toString(), 18)}`)
+              console.log(`   Current allowance: ${ethers.formatUnits(allowance, tokenDetails.decimals)}`)
+              console.log(`   Required: ${ethers.formatUnits(maxEthCharge.toString(), 18)} ETH`)
+              console.log(`   Required: ${ethers.formatUnits(maxTokenCharge.toString(), tokenDetails.decimals)} ${tokenDetails.name}`)
 
               if (BigInt(allowance) >= maxTokenCharge) {
                 console.log(`✅ Sufficient allowance, no approvalData needed`)

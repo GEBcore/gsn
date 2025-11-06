@@ -489,45 +489,50 @@ async function getEIP712Domain (
 /**
  * Encode permit data for approvalData field
  */
-export function encodePermitData (permitData: PermitData, permitSelector: string): string {
-  // Generate compact 260-byte encoding (4 bytes selector + 256 bytes parameters)
-  // Each parameter is exactly 32 bytes in compact format
-
-  // Convert each parameter to exactly 32 bytes
-  const params32Bytes = [
-    // address: 20 bytes -> pad to 32 bytes (64 hex chars)
-    permitData.owner.slice(2).padStart(64, '0'),
-    // address: 20 bytes -> pad to 32 bytes (64 hex chars)
-    permitData.spender.slice(2).padStart(64, '0'),
-    // uint256: convert to hex and pad to 32 bytes (64 hex chars)
-    BigInt(permitData.value).toString(16).padStart(64, '0'),
-    // uint256: convert to hex and pad to 32 bytes (64 hex chars)
-    BigInt(permitData.nonce).toString(16).padStart(64, '0'),
-    // uint256: convert to hex and pad to 32 bytes (64 hex chars)
-    BigInt(permitData.deadline).toString(16).padStart(64, '0'),
-    // uint8: convert to hex and pad to 32 bytes (64 hex chars)
-    BigInt(permitData.v).toString(16).padStart(64, '0'),
-    // bytes32: already 32 bytes, just remove 0x prefix
-    permitData.r.slice(2),
-    // bytes32: already 32 bytes, just remove 0x prefix
-    permitData.s.slice(2)
-  ]
-
-  // Combine all parameters (total: 8 * 32 = 256 bytes)
-  const encodedParams = '0x' + params32Bytes.join('')
-
-  // Extract only the first 4 bytes (10 hex chars including 0x) of the permit selector
-  // Paymaster may store it as 32 bytes, but we only need the 4-byte function selector
-  const functionSelector = permitSelector.slice(0, 10)
-
-  // Combine selector and parameters (4 + 256 = 260 bytes total)
-  return functionSelector + encodedParams.slice(2)
-}
 
 /**
  * Encode paymasterData (token address)
  * GebPermitERC20Paymaster expects exactly 32 bytes containing the token address
  */
+/**
+ * Encode approval data using proper contract interface (replaces manual encoding)
+ * This ensures correct ABI encoding that matches Solidity contract expectations
+ */
+export function encodePermitDataWithContractInterface (
+  tokenAddress: Address,
+  permitData: PermitData,
+  permitSelector: string,
+  provider: any
+): string {
+  // Create a contract interface for proper ABI encoding (7-parameter permit)
+  const tokenContract = new ethers.Contract(tokenAddress, [
+    'function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external'
+  ], provider)
+
+  // Use contract interface to encode the permit call data (7 parameters, no nonce)
+  const callData = tokenContract.interface.encodeFunctionData("permit", [
+    permitData.owner,
+    permitData.spender,
+    permitData.value,
+    permitData.deadline,
+    Number(permitData.v), // Convert bigint to number for uint8
+    permitData.r,
+    permitData.s
+  ])
+
+  console.log(`🔧 Contract interface encoded approvalData: ${callData.length} characters (${callData.length / 2 - 1} bytes)`)
+
+  // Verify length: should be 4 bytes selector + 7*32 bytes parameters = 228 bytes
+  const expectedLength = 4 + 7 * 32
+  const actualLength = callData.length / 2 - 1
+
+  if (actualLength !== expectedLength) {
+    throw new Error(`Invalid approvalData length: ${actualLength} bytes, expected ${expectedLength} bytes`)
+  }
+
+  return callData
+}
+
 export function encodePaymasterData (tokenAddress: Address): string {
   // Remove 0x prefix if present
   const cleanAddress = tokenAddress.replace('0x', '')
