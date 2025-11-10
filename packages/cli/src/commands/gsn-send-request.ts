@@ -3,26 +3,23 @@ import * as bip39 from 'ethereum-cryptography/bip39'
 import Web3 from 'web3'
 import commander from 'commander'
 import fs from 'fs'
-import { type PrefixedHexString } from 'ethereumjs-util'
 import { hdkey as EthereumHDKey } from 'ethereumjs-wallet'
 import { toHex, toWei } from 'web3-utils'
-import { type HttpProvider } from 'web3-core'
 import { ethers } from 'ethers'
 
 import {
   type Address,
-  constants,
   type LoggerInterface
 } from '@opengsn/common'
 
-import { type GSNConfig, type GSNDependencies, type GSNUnresolvedConstructorInput, RelayProvider } from '@opengsn/provider'
+import { type GSNConfig, type GSNUnresolvedConstructorInput } from '@opengsn/provider'
 import { createCommandsLogger } from '@opengsn/logger/dist/CommandsWinstonLogger'
+import { ConservativeGasEstimator } from '../ConservativeGasEstimator'
 
 import {
   getMnemonic,
   getNetworkUrl,
   gsnCommander,
-  type TokenInfo,
   getSupportedTokens,
   getTokenInfo,
   getTokenDetails,
@@ -45,8 +42,11 @@ function commaSeparatedList (value: string, _dummyPrevious: string[]): string[] 
 async function handleTokenOperations (
   paymasterAddress: Address,
   userAddress: Address,
-  provider: any
-): Promise<{ tokenAddress: Address, approvalData?: string }> {
+  provider: any,
+  targetAddress?: Address,
+  calldata?: string,
+  gasLimit?: number
+): Promise<{ tokenAddress: Address, approvalData?: string, gasEstimate?: { maxPossibleGas: number, maxEthCharge: bigint }, tokenDetails?: { name: string, symbol: string, decimals: number, balance: string, nonce: string } }> {
   // If --listTokens is specified, show supported tokens and exit
   if (commander.listTokens) {
     await displaySupportedTokens(paymasterAddress, userAddress, provider)
@@ -150,9 +150,78 @@ async function handleTokenOperations (
     console.log('✅ Sufficient allowance already exists')
   }
 
-  return {
-    tokenAddress,
-    approvalData
+  // Perform conservative gas estimation using the new estimator
+  console.log('🔮 Performing conservative gas estimation for GSN transaction...')
+  try {
+    const actualCalldata = calldata || '0x'
+
+    // Initialize the conservative gas estimator
+    const gasEstimator = new ConservativeGasEstimator()
+
+    // Use actual target address for gas estimation, fallback to userAddress if not provided
+    const estimationTargetAddress = targetAddress || userAddress
+
+    console.log(`Estimation target: ${estimationTargetAddress}`)
+    console.log(`Calldata: ${actualCalldata}`)
+
+    // Perform gas estimation with real data and CLI gasLimit
+    const gasEstimate = await gasEstimator.estimateGas(
+      actualCalldata,
+      estimationTargetAddress,
+      provider,
+      gasLimit,
+      userAddress, // real user address from function parameter
+      paymasterAddress, // real paymaster address from function parameter
+      undefined // forwarder address (will be resolved by GSN)
+    )
+
+    console.log(`✅ Conservative gas estimation completed:`)
+    console.log(`   User calldata: ${actualCalldata.slice(0, 10)}... (${actualCalldata.length} chars, ${Math.floor(actualCalldata.length / 2)} bytes)`)
+    console.log(`\n📊 Gas Components Breakdown:`)
+    console.log(`   msgDataLength: ${gasEstimate.components.msgDataLength.toLocaleString()}`)
+    console.log(`   calldataGasUsed: ${gasEstimate.components.calldataGasUsed.toLocaleString()}`)
+    console.log(`   gasAndDataLimits: ${gasEstimate.components.gasAndDataLimits.toLocaleString()}`)
+    console.log(`   innerRecipientCallGasLimit: ${gasEstimate.components.innerRecipientCallGasLimit.toLocaleString()}`)
+    console.log(`   msgDataGasCostInsideTransaction: ${gasEstimate.components.msgDataGasCostInsideTransaction.toLocaleString()}`)
+    console.log(`   dataOnChainHandlingGasCostPerByte: ${gasEstimate.components.dataOnChainHandlingGasCostPerByte}`)
+    console.log(`   relayHubGasOverhead: ${gasEstimate.components.relayHubGasOverhead.toLocaleString()}`)
+    console.log(`\n💰 Total Calculation:`)
+    console.log(`   Maximum possible gas: ${gasEstimate.maxPossibleGas.toLocaleString()}`)
+    console.log(`   Gas price (with 20% markup): ${(Number(gasEstimate.gasPrice.toString()) / 1e9).toFixed(6)} gwei`)
+    console.log(`   Estimated max ETH charge: ${gasEstimate.maxEthCharge.toString()} wei`)
+    console.log(`   Required: ${gasEstimate.requiredEth} ETH`)
+
+    // Calculate and display max token charge if we have token info
+    try {
+      const tokenInfo = await getTokenInfo(tokenAddress, paymasterAddress, provider)
+      if (tokenInfo && tokenDetails) {
+        // Calculate token charge: (maxEthCharge * tokenExchangeRate) / 1e18
+        const tokenExchangeRate = BigInt(tokenInfo.exchangeRate)
+        const maxTokenCharge = (gasEstimate.maxEthCharge * tokenExchangeRate) / BigInt(10 ** 18)
+        const maxTokenChargeFormatted = ethers.formatUnits(maxTokenCharge.toString(), tokenDetails.decimals)
+
+        console.log(`   Required: ${maxTokenChargeFormatted} ${tokenDetails.symbol})`)
+      }
+    } catch (tokenError: any) {
+      console.log(`   Token charge calculation failed: ${tokenError.message}`)
+    }
+
+    return {
+      tokenAddress,
+      approvalData,
+      gasEstimate: {
+        maxPossibleGas: gasEstimate.maxPossibleGas,
+        maxEthCharge: gasEstimate.maxEthCharge
+      },
+      tokenDetails
+    }
+  } catch (error: any) {
+    console.warn('⚠️  Conservative gas estimation failed, proceeding without pre-estimation:', error.message)
+    // Continue without gas estimation - fallback to runtime calculation
+    return {
+      tokenAddress,
+      approvalData
+    }
   }
 }
 
@@ -182,12 +251,13 @@ gsnCommander(['n', 'f', 'm', 'g', 'l'])
   .parse(process.argv)
 
 async function getProvider (
-  to: Address,
+  to: Address | undefined,
   paymaster: Address,
   mnemonic: string | undefined,
   logger: LoggerInterface,
-  host: string
-): Promise<{ provider: any, from: Address, tokenData?: { tokenAddress: Address, approvalData?: string, paymasterData: string } }> {
+  host: string,
+  targetCalldata?: string
+): Promise<{ provider: any, from: Address, tokenData?: { tokenAddress: Address, approvalData?: string, paymasterData: string, gasEstimate?: { maxPossibleGas: number, maxEthCharge: bigint } } }> {
   let from: Address
   if (commander.privateKeyHex != null) {
     // For GSN transactions, derive from privateKeyHex to ensure consistency
@@ -233,21 +303,36 @@ async function getProvider (
 
     // Create a temporary provider for token operations
     const tempProvider = new ethers.JsonRpcProvider(host)
-    let tokenData: { tokenAddress: Address, approvalData?: string, paymasterData: string } | undefined
+    let tokenData: { tokenAddress: Address, approvalData?: string, paymasterData: string, gasEstimate?: { maxPossibleGas: number, maxEthCharge: bigint } } | undefined
 
     // Handle token operations for GebPermitERC20Paymaster
     console.log('Starting token operations for paymaster:', paymaster)
     try {
-      const tokenOps = await handleTokenOperations(paymaster, from, tempProvider)
+      const gas = commander.gasLimit ? parseInt(commander.gasLimit) : undefined
+      const tokenOps = await handleTokenOperations(paymaster, from, tempProvider, to, targetCalldata, gas)
       tokenData = {
         tokenAddress: tokenOps.tokenAddress,
         approvalData: tokenOps.approvalData,
-        paymasterData: encodePaymasterData(tokenOps.tokenAddress)
+        paymasterData: encodePaymasterData(tokenOps.tokenAddress),
+        gasEstimate: tokenOps.gasEstimate
       }
       console.log(`✅ Token operations successful:`)
       console.log(`   Token: ${tokenOps.tokenAddress}`)
       console.log(`   PaymasterData: ${tokenData.paymasterData}`)
       console.log(`   ApprovalData: ${tokenOps.approvalData ? 'Present' : 'Not required'}`)
+      if (tokenOps.gasEstimate) {
+        console.log(`   Pre-calculated gas estimate: ${tokenOps.gasEstimate.maxPossibleGas.toLocaleString()}`)
+      }
+      if (tokenOps.gasEstimate && tokenOps.tokenDetails) {
+        // Calculate token charge based on token exchange rate
+        const tokenInfo = await getTokenInfo(tokenOps.tokenAddress, paymaster, tempProvider)
+        if (tokenInfo) {
+          // Calculate token charge: (maxEthCharge * tokenExchangeRate) / 1e18
+          const tokenExchangeRate = BigInt(tokenInfo.exchangeRate)
+          const maxTokenCharge = (tokenOps.gasEstimate.maxEthCharge * tokenExchangeRate) / BigInt(10 ** 18)
+          console.log(`   Required: ${ethers.formatUnits(maxTokenCharge.toString(), tokenOps.tokenDetails.decimals)} ${tokenOps.tokenDetails.symbol}`)
+        }
+      }
     } catch (error: any) {
       // If token operations fail, we might be using a different paymaster
       console.error('❌ Token operations failed, proceeding with regular GSN transaction:')
@@ -263,7 +348,7 @@ async function getProvider (
       paymasterAddress: paymaster,
       performDryRunViewRelayCall: false,
       maxPaymasterDataLength: 32, // Allow 32 bytes for token address
-      maxApprovalDataLength: 300 // Allow space for 260-byte permit signature data
+      maxApprovalDataLength: 228 // EIP-2612 permit signature data
     }
 
     const wallet = new ethers.Wallet(commander.privateKeyHex, new NoSignerProvider(host))
@@ -284,48 +369,21 @@ async function getProvider (
             return '0x'
           }
 
-          // Check if we still need to provide approvalData by checking current allowance
-          try {
-            const tokenAddress = tokenData.tokenAddress
-            const allowance = await getTokenAllowance(tokenAddress, from, paymaster, tempProvider)
-
-            // Estimate the gas cost (rough estimate)
-            const gasEstimate = parseInt(relayRequest.request.gas || '100000')
-            const gasPrice = relayRequest.relayData.maxFeePerGas || '0x927c0'
-            const maxEthCharge = BigInt(gasEstimate) * BigInt(gasPrice)
-
-            // Get token info and details to calculate token cost
-            const tokenInfo = await getTokenInfo(tokenAddress, paymaster, tempProvider)
-            const tokenDetails = await getTokenDetails(tokenAddress, from, tempProvider)
-            if (tokenInfo && tokenDetails) {
-              const maxTokenCharge = (maxEthCharge * BigInt(tokenInfo.exchangeRate)) / BigInt('1000000000000000000')
-
-              console.log(`🔍 Checking allowance:`)
-              console.log(`   Current allowance: ${ethers.formatUnits(allowance, tokenDetails.decimals)}`)
-              console.log(`   Required: ${ethers.formatUnits(maxEthCharge.toString(), 18)} ETH`)
-              console.log(`   Required: ${ethers.formatUnits(maxTokenCharge.toString(), tokenDetails.decimals)} ${tokenDetails.name}`)
-
-              if (BigInt(allowance) >= maxTokenCharge) {
-                console.log(`✅ Sufficient allowance, no approvalData needed`)
-                return '0x'
-              } else {
-                console.log(`❌ Insufficient allowance, providing approvalData`)
-                if (tokenData.approvalData) {
-                  console.log(`📝 Providing approvalData: ${tokenData.approvalData.slice(0, 10)}...`)
-                  return tokenData.approvalData
-                }
-              }
-            }
-          } catch (error) {
-            console.warn('Error checking allowance, providing approvalData anyway:', error)
-          }
-
-          // Fallback: provide approvalData if we can't determine allowance
+          // Use pre-calculated approvalData from handleTokenOperations
+          // This avoids expensive gas calculation during transaction processing
           if (tokenData.approvalData) {
-            console.log(`📝 Providing approvalData (fallback): ${tokenData.approvalData.slice(0, 10)}...`)
+            console.log(`📝 Using pre-calculated approvalData: ${tokenData.approvalData.slice(0, 10)}...`)
+            if (tokenData.gasEstimate) {
+              console.log(`   Using pre-calculated gas estimate: ${tokenData.gasEstimate.maxPossibleGas.toLocaleString()}`)
+            }
             return tokenData.approvalData
+          } else {
+            console.log(`✅ No approvalData needed (sufficient allowance pre-checked)`)
+            if (tokenData.gasEstimate) {
+              console.log(`   Using pre-calculated gas estimate: ${tokenData.gasEstimate.maxPossibleGas.toLocaleString()}`)
+            }
+            return '0x'
           }
-          return '0x'
         }
       }
     }
@@ -355,7 +413,8 @@ async function getProvider (
     commander.paymaster,
     mnemonic,
     logger,
-    nodeURL
+    nodeURL,
+    commander.calldata
   )
   const { provider, from } = providerResult
 
