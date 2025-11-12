@@ -37,6 +37,102 @@ function commaSeparatedList (value: string, _dummyPrevious: string[]): string[] 
 }
 
 /**
+ * Generate standalone permit calldata for ERC20 tokens
+ */
+async function generatePermitCallData (
+  tokenAddress: Address,
+  spenderAddress: Address,
+  amount: string,
+  privateKeyHex: string,
+  provider: any,
+  deadline?: number
+): Promise<{
+  callData: string,
+  owner: Address,
+  spender: Address,
+  value: string,
+  deadline: number,
+  tokenAddress: Address,
+  v: number,
+  r: string,
+  s: string
+}> {
+  if (!privateKeyHex) {
+    throw new Error('--privateKeyHex is required for permit generation')
+  }
+
+  // Derive owner address from private key
+  const owner = new ethers.Wallet(privateKeyHex).address
+  console.log(`Owner address: ${owner}`)
+
+  // Convert amount string to appropriate value
+  let value: string
+  try {
+    value = ethers.getBigInt(amount).toString()
+    console.log(`Parsed amount as raw value: ${value}`)
+  } catch {
+    throw new Error(`Invalid amount format: ${amount}. Use number (e.g., "100000000")`)
+  }
+
+  // Set deadline
+  const finalDeadline = deadline || getDefaultDeadline()
+  console.log(`Permit deadline: ${new Date(Number(finalDeadline) * 1000).toLocaleString()}`)
+
+  // Get token decimals for better logging
+  try {
+    const tokenContract = new ethers.Contract(tokenAddress, ['function decimals() view returns (uint8)'], provider)
+    const decimals = await tokenContract.decimals()
+    const formattedValue = ethers.formatUnits(value, decimals)
+    console.log(`Permit value: ${formattedValue} tokens (${decimals} decimals)`)
+  } catch (error) {
+    console.log('Could not fetch token decimals, showing raw value')
+  }
+
+  // Generate permit signature
+  console.log('Generating EIP-712 permit signature...')
+  const permitData = await generatePermitSignature(
+    tokenAddress,
+    owner,
+    spenderAddress,
+    value,
+    finalDeadline.toString(),
+    privateKeyHex,
+    provider
+  )
+
+  // For standalone permit, we'll use the standard permit interface (7 parameters)
+  const tokenContract = new ethers.Contract(tokenAddress, [
+    'function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external'
+  ], provider)
+
+  // Encode the permit call data (standard EIP-2612 format)
+  const callData = tokenContract.interface.encodeFunctionData("permit", [
+    permitData.owner,
+    permitData.spender,
+    permitData.value,
+    permitData.deadline,
+    Number(permitData.v), // Convert bigint to number for uint8
+    permitData.r,
+    permitData.s
+  ])
+
+  console.log('✅ Permit signature generated successfully')
+  console.log(`Call data length: ${callData.length} characters (${callData.length / 2 - 1} bytes)`)
+
+  return {
+    callData,
+    owner: permitData.owner,
+    spender: permitData.spender,
+    value: permitData.value,
+    deadline: Number(permitData.deadline),
+    tokenAddress,
+    v: Number(permitData.v),
+    r: permitData.r,
+    s: permitData.s
+  }
+}
+
+/**
  * Handle token-related operations for GSN transactions
  */
 async function handleTokenOperations (
@@ -248,6 +344,10 @@ gsnCommander(['n', 'f', 'm', 'g', 'l'])
   .option('--listTokens', 'list all supported tokens by the paymaster')
   .option('--permitDeadline <number>', 'Permit deadline (seconds since epoch, default: 1 hour from now)')
   .option('--forcePermit', 'force permit generation even with sufficient allowance')
+  // Permit-only options
+  .option('--permit-erc20 <string>', 'Generate permit calldata for specified ERC20 token address')
+  .option('--spender <string>', 'Spender address for permit (required with --permit-erc20)')
+  .option('--amount <string>', 'Amount to approve for permit (required with --permit-erc20, can be number or "max")')
   .parse(process.argv)
 
 async function getProvider (
@@ -399,6 +499,58 @@ async function getProvider (
 }
 
 (async () => {
+  // Handle permit-only mode
+  if (commander.permitErc20) {
+    console.log('🔐 Generating standalone ERC20 permit calldata...')
+
+    // Validate required parameters for permit-only mode
+    if (!commander.spender) {
+      throw new Error('--spender is required when using --permit-erc20')
+    }
+    if (!commander.amount) {
+      throw new Error('--amount is required when using --permit-erc20')
+    }
+    if (!commander.privateKeyHex) {
+      throw new Error('--privateKeyHex is required when using --permit-erc20')
+    }
+
+    const network: string = commander.network
+    const nodeURL = getNetworkUrl(network)
+    const provider = new ethers.JsonRpcProvider(nodeURL)
+
+    try {
+      const permitResult = await generatePermitCallData(
+        commander.permitErc20,
+        commander.spender,
+        commander.amount,
+        commander.privateKeyHex,
+        provider,
+        commander.permitDeadline ? parseInt(commander.permitDeadline) : undefined
+      )
+
+      console.log('\n📋 Permit Calldata Generated:')
+      console.log('=' .repeat(50))
+      console.log(`Token Address: ${permitResult.tokenAddress}`)
+      console.log(`Owner Address: ${permitResult.owner}`)
+      console.log(`Spender Address: ${permitResult.spender}`)
+      console.log(`Value: ${permitResult.value}`)
+      console.log(`Deadline: ${permitResult.deadline} (${new Date(permitResult.deadline * 1000).toLocaleString()})`)
+      console.log(`v: ${permitResult.v}`)
+      console.log(`r: ${permitResult.r}`)
+      console.log(`s: ${permitResult.s}`)
+
+      console.log('\n📤 Call Data:')
+      console.log(permitResult.callData)
+
+      process.exit(0)
+    } catch (error: any) {
+      console.error('❌ Permit generation failed:', error.message)
+      console.error('Stack:', error.stack || 'No stack available')
+      process.exit(1)
+    }
+  }
+
+  // Original GSN transaction mode
   const network: string = commander.network
   const nodeURL = getNetworkUrl(network)
   const logger = createCommandsLogger(commander.loglevel)
