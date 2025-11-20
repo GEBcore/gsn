@@ -526,12 +526,6 @@ export async function displaySupportedTokens (
       console.log(`   Exchange Rate: 1 ETH = ${ethers.formatUnits(tokenInfo.exchangeRate, 18)} ${tokenDetails.symbol}`)
       console.log(`   Valid From Block: ${tokenInfo.validFromBlock}`)
       console.log(`   Permit Selector: ${tokenInfo.permitSelector}`)
-
-      if (allowance === '0') {
-        console.log('   ⚠️  Permit required (no allowance)')
-      } else {
-        console.log('   ✅ Sufficient allowance')
-      }
     } catch (error) {
       console.log(`   Error getting token details: ${error}`)
     }

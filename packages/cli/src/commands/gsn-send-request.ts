@@ -205,47 +205,6 @@ async function handleTokenOperations (
     throw new Error(`Token ${tokenAddress} is not supported by the paymaster`)
   }
 
-  // Determine if we need to generate a permit
-  let approvalData: string | undefined
-  const needPermit = allowance === '0' || commander.forcePermit
-
-  if (needPermit) {
-    console.log('Generating EIP-712 permit signature...')
-
-    if (!commander.privateKeyHex) {
-      throw new Error('--privateKeyHex is required for permit generation')
-    }
-
-    // Set a generous permit value (equivalent to large amount of ETH)
-    const permitValue = ethers.MaxUint256.toString() // Maximum possible value
-
-    // Set deadline
-    const deadline = commander.permitDeadline || getDefaultDeadline()
-    console.log(`Permit deadline: ${new Date(parseInt(deadline) * 1000).toLocaleString()}`)
-
-    // Generate permit signature
-    const permitData = await generatePermitSignature(
-      tokenAddress,
-      userAddress,
-      paymasterAddress,
-      permitValue,
-      deadline,
-      commander.privateKeyHex,
-      provider
-    )
-
-    // Encode the approval data using proper contract interface
-    approvalData = encodePermitDataWithContractInterface(
-      tokenAddress,
-      permitData,
-      tokenInfo.permitSelector,
-      provider
-    )
-    console.log('✅ Permit signature generated successfully')
-  } else {
-    console.log('✅ Sufficient allowance already exists')
-  }
-
   // Perform conservative gas estimation using the new estimator
   console.log('🔮 Performing conservative gas estimation for GSN transaction...')
   try {
@@ -288,18 +247,68 @@ async function handleTokenOperations (
     console.log(`   Required: ${gasEstimate.requiredEth} ETH`)
 
     // Calculate and display max token charge if we have token info
+    let maxTokenCharge: bigint | undefined
     try {
-      const tokenInfo = await getTokenInfo(tokenAddress, paymasterAddress, provider)
       if (tokenInfo && tokenDetails) {
         // Calculate token charge: (maxEthCharge * tokenExchangeRate) / 1e18
         const tokenExchangeRate = BigInt(tokenInfo.exchangeRate)
-        const maxTokenCharge = (gasEstimate.maxEthCharge * tokenExchangeRate) / BigInt(10 ** 18)
+        maxTokenCharge = (gasEstimate.maxEthCharge * tokenExchangeRate) / BigInt(10 ** 18)
         const maxTokenChargeFormatted = ethers.formatUnits(maxTokenCharge.toString(), tokenDetails.decimals)
 
         console.log(`   Required: ${maxTokenChargeFormatted} ${tokenDetails.symbol})`)
       }
     } catch (tokenError: any) {
       console.log(`   Token charge calculation failed: ${tokenError.message}`)
+    }
+
+    // Determine if we need to generate a permit based on allowance vs estimated token charge
+    let approvalData: string | undefined
+    const needPermit = allowance === '0' || commander.forcePermit || (maxTokenCharge !== undefined && BigInt(allowance) < maxTokenCharge)
+
+    if (needPermit) {
+      if (allowance === '0') {
+        console.log('   No allowance found - generating permit...')
+      } else if (commander.forcePermit) {
+        console.log('   Force permit requested - generating permit...')
+      } else if (maxTokenCharge !== undefined && BigInt(allowance) < maxTokenCharge) {
+        const allowanceFormatted = ethers.formatUnits(allowance, tokenDetails.decimals)
+        const maxTokenChargeFormatted = ethers.formatUnits(maxTokenCharge.toString(), tokenDetails.decimals)
+        console.log(`   Insufficient allowance: ${allowanceFormatted} < required ${maxTokenChargeFormatted} - generating permit...`)
+      }
+      console.log('Generating EIP-712 permit signature...')
+
+      if (!commander.privateKeyHex) {
+        throw new Error('--privateKeyHex is required for permit generation')
+      }
+
+      // Set a generous permit value (equivalent to large amount of ETH)
+      const permitValue = ethers.MaxUint256.toString() // Maximum possible value
+
+      // Set deadline
+      const deadline = commander.permitDeadline || getDefaultDeadline()
+      console.log(`Permit deadline: ${new Date(parseInt(deadline) * 1000).toLocaleString()}`)
+
+      // Generate permit signature
+      const permitData = await generatePermitSignature(
+        tokenAddress,
+        userAddress,
+        paymasterAddress,
+        permitValue,
+        deadline,
+        commander.privateKeyHex,
+        provider
+      )
+
+      // Encode the approval data using proper contract interface
+      approvalData = encodePermitDataWithContractInterface(
+        tokenAddress,
+        permitData,
+        tokenInfo.permitSelector,
+        provider
+      )
+      console.log('✅ Permit signature generated successfully')
+    } else {
+      console.log('✅ Sufficient allowance already exists')
     }
 
     return {
@@ -313,6 +322,48 @@ async function handleTokenOperations (
     }
   } catch (error: any) {
     console.warn('⚠️  Conservative gas estimation failed, proceeding without pre-estimation:', error.message)
+
+    // Fallback to original logic when gas estimation fails
+    let approvalData: string | undefined
+    const needPermit = allowance === '0' || commander.forcePermit
+
+    if (needPermit) {
+      console.log('Generating EIP-712 permit signature...')
+
+      if (!commander.privateKeyHex) {
+        throw new Error('--privateKeyHex is required for permit generation')
+      }
+
+      // Set a generous permit value (equivalent to large amount of ETH)
+      const permitValue = ethers.MaxUint256.toString() // Maximum possible value
+
+      // Set deadline
+      const deadline = commander.permitDeadline || getDefaultDeadline()
+      console.log(`Permit deadline: ${new Date(parseInt(deadline) * 1000).toLocaleString()}`)
+
+      // Generate permit signature
+      const permitData = await generatePermitSignature(
+        tokenAddress,
+        userAddress,
+        paymasterAddress,
+        permitValue,
+        deadline,
+        commander.privateKeyHex,
+        provider
+      )
+
+      // Encode the approval data using proper contract interface
+      approvalData = encodePermitDataWithContractInterface(
+        tokenAddress,
+        permitData,
+        tokenInfo.permitSelector,
+        provider
+      )
+      console.log('✅ Permit signature generated successfully')
+    } else {
+      console.log('✅ Sufficient allowance already exists')
+    }
+
     // Continue without gas estimation - fallback to runtime calculation
     return {
       tokenAddress,
@@ -386,8 +437,8 @@ async function getProvider (
   }
 
   if (commander.directCall === true) {
-    // Direct call: use wallet with NoSignerProvider
-    const wallet = new ethers.Wallet(commander.privateKeyHex, new NoSignerProvider(host))
+    // Direct call: use wallet with regular provider (NoSignerProvider not needed for direct calls)
+    const wallet = new ethers.Wallet(commander.privateKeyHex, new ethers.JsonRpcProvider(host))
     return { provider: wallet, from }
   } else {
     if (paymaster == null) {
@@ -615,7 +666,13 @@ async function getProvider (
 
     if (commander.directCall === true && provider.sendTransaction) {
       // Direct call with ethers Wallet
-      gasPrice = commander.gasPrice != null ? toWei(commander.gasPrice, 'gwei').toString() : await provider.getGasPrice()
+      if (commander.gasPrice != null) {
+        gasPrice = toWei(commander.gasPrice, 'gwei').toString()
+      } else {
+        // For ethers v6 Wallet, get gas price from the provider
+        const feeData = await provider.provider.getFeeData()
+        gasPrice = feeData.gasPrice?.toString() || feeData.maxFeePerGas?.toString() || '0'
+      }
 
       const receipt = await provider.sendTransaction({
         to: commander.to,
@@ -652,7 +709,14 @@ async function getProvider (
       }
       const methodParams = commander.methodParams
 
-      const gasPrice = commander.gasPrice != null ? toWei(commander.gasPrice, 'gwei').toString() : await provider.getGasPrice()
+      let gasPrice
+      if (commander.gasPrice != null) {
+        gasPrice = toWei(commander.gasPrice, 'gwei').toString()
+      } else {
+        // For ethers v6 Wallet, get gas price from the provider
+        const feeData = await provider.provider.getFeeData()
+        gasPrice = feeData.gasPrice?.toString() || feeData.maxFeePerGas?.toString() || '0'
+      }
       const gas = commander.gasLimit
 
       const receipt = await method(...methodParams, {
